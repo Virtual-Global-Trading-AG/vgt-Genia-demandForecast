@@ -1,10 +1,9 @@
 import pandas as pd
 import numpy as np
-import pytz
+from io import StringIO
 from flask import Flask, jsonify, request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
-import requests
 import pickle
 
 JSON_ORIENT = "split"
@@ -58,6 +57,8 @@ class demandForecastManager:
             # parse and check identifiers from request
             building_identifier = request.headers.get("buildingIdentifier")
             smartmeter_identifiers = request.headers.get("smartmeterIdentifiers")
+            if building_identifier is None or smartmeter_identifiers is None:
+                return jsonify({'message': 'Building Identifier or Smartmeter identifier is None'}), 400
             smartmeter_identifiers = smartmeter_identifiers.split(",")
 
             # check building identifier
@@ -112,12 +113,13 @@ class demandForecastManager:
             # add new columns to database
             try:
                 data = pd.read_feather(f"{self.data_path}/{building_identifier}.feather")
+                for smartmeter_identifier in ids_not_in_db:
+                    data[smartmeter_identifier + "_delta_energy"] = np.nan
             except FileNotFoundError:
-                return jsonify({'message': 'Missing database entry for buildingIdentifier.'}), 400
-            
-            for smartmeter_identifier in ids_not_in_db:
-                data[smartmeter_identifier + "_delta_energy"] = np.nan
-            
+                columns = ['timestamp']
+                columns.extend(smartmeter_identifiers)
+                data = pd.DataFrame(columns=columns)
+
             data.to_feather(f"{self.data_path}{building_identifier}.feather")
 
             # store identifiers
@@ -172,7 +174,7 @@ class demandForecastManager:
         
         @self.app.route("/getMeasurements", methods=['GET'])
         def get_measurements():
-            building_identifier = request.header.get("buildingIdentifier")
+            building_identifier = request.headers.get("buildingIdentifier")
             start = request.headers.get("start")
             end = request.headers.get("end")
 
@@ -200,6 +202,9 @@ class demandForecastManager:
         def post_measurements():
             building_identifier = request.headers.get('buildingIdentifier')
             smartmeter_identifiers = request.headers.get('smartmeterIdentifiers')
+            if building_identifier is None or smartmeter_identifiers is None:
+                return jsonify({'message': 'Either buildingIdentifier or smartmeterIdentifier is None'}), 400
+            smartmeter_identifiers = smartmeter_identifiers.split(",")
             data_json = request.json
 
             # check building identifiers and smartmeter identifiers
@@ -211,20 +216,56 @@ class demandForecastManager:
                 return jsonify({'message': "Missing data."}), 400
             
             # convert to dataframe
+            dtype = {'timestamp':'str'}
+            for smartmeter_identifier in smartmeter_identifiers:
+                dtype[f'{smartmeter_identifier}_delta_energy'] = 'float32'
+
             try:
-                new_data = pd.DataFrame(data_json)
-            except ValueError:
+                new_data = pd.read_json(StringIO(data_json), orient=JSON_ORIENT, dtype=dtype)
+            except ValueError as e:
                 return jsonify({'message': 'Error in json'}), 400
             
             # check new data
             if new_data.isna().any().any():
                 return jsonify({'message': 'Dataframe contains missing values'}), 400
             
+            # check timestamp data
+            if new_data.timestamp.dtype != 'object':
+                return jsonify({'message': f'{new_data.timestamp.dtype} wrong dtype for timestamp column'}), 400
+
+            # check delta energy values
+            for smartmeter_identifier in smartmeter_identifiers:
+                faulty_dtype_columns = []
+                column_name = f'{smartmeter_identifier}_delta_energy'
+                try:
+                    if new_data[column_name].dtype != 'float32':
+                        faulty_dtype_columns.append(column_name)
+                except KeyError:
+                    return jsonify({'message': f'Column {column_name} is not in posted data.'}), 400
+                if len(faulty_dtype_columns) > 0:
+                    return jsonify({'message': f'Wrong dtype for the columns: {faulty_dtype_columns}'}), 400
+                
+            # convert timestamps to datetime objects
+            new_data['timestamp'] = new_data.timestamp.apply(lambda x: datetime.fromisoformat(x))
+
+            if new_data.timestamp.dt.tz != timezone.utc:
+                return jsonify({'message': 'Timestamps have wrong timezone'}), 400
+        
             # write new values to database
             fp = self.data_path + building_identifier + ".feather"
             data = pd.read_feather(fp)
-            data.update(new_data)
-            data = new_data.combine_first(data)
+
+            # overwrite existing, add new
+            data = pd.merge(left=data, right=new_data, left_on="timestamp", right_on="timestamp", how="outer")
+            for smartmeter_identifier in smartmeter_identifiers:
+                data.loc[~data[f'{smartmeter_identifier}_delta_energy_y'].isna(), f'{smartmeter_identifier}_delta_energy_x'] = \
+                    data.loc[~data[f'{smartmeter_identifier}_delta_energy_y'].isna(), f'{smartmeter_identifier}_delta_energy_y']
+                data = data.drop(columns=[f'{smartmeter_identifier}_delta_energy_y'])
+                data = data.rename(columns={f'{smartmeter_identifier}_delta_energy_x': f'{smartmeter_identifier}_delta_energy'})
+
+            # ensure sorting
+            data.sort_values(by='timestamp', ascending=True, inplace=True)
+            
             data.to_feather(fp)
             
             return jsonify({'message': 'Wrote measurements to database'})
@@ -241,7 +282,7 @@ class demandForecastManager:
             raise NotImplementedError
 
             # if forecasting service is not available
-            return jsonify({'message': 'Forecasting service is down. '}), 503
+            return jsonify({'message': 'Forecasting service is down.'}), 503
 
     def check_identifier_dtype(self, identifier:str):
         """
