@@ -3,10 +3,18 @@ import numpy as np
 from io import StringIO
 from flask import Flask, jsonify, request
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
 import os
 import pickle
 
 JSON_ORIENT = "split"
+
+@dataclass
+class metaDataStorage:
+    building_id : str
+    smartmeter_ids : list = field(default_factory=list)
+    min_values : dict = field(default_factory=dict)
+    max_values : dict = field(default_factory=dict)
 
 class demandForecastManager:
     """
@@ -33,7 +41,7 @@ class demandForecastManager:
         self.last_restart = datetime.now()
 
         # reload identifiers
-        self.smartmeter_identifiers = {} # dictionary 
+        self.meta_data = {} # dictionary 
         self.reload_identifiers()
 
     def configure_routes(self):
@@ -49,7 +57,22 @@ class demandForecastManager:
         @self.app.route("/getIds", methods=['GET'])
         def get_ids():
             """Return all building identifiers in database."""
-            return jsonify({'buildingIds': self.smartmeter_identifiers})
+            return jsonify({'buildingIds': list(self.meta_data.keys())})
+        
+        @self.app.route("/getSmartmeterIds", methods=['GET'])
+        def get_smartmeter_ids():
+            """Returns smartmeter ids for building id."""
+            # parse and check   
+            building_id = request.headers.get("buildingIdentifier")
+            valid, message = self.check_building_identifier_db(building_identifier=building_id)
+            
+            if not valid:
+                return jsonify({'message': message}), 400
+            
+            # get smartmeter ids
+            smartmeter_ids = self.meta_data[building_id].smartmeter_ids
+
+            return jsonify({'smartmeterIdentifiers': smartmeter_ids})
 
         ## add new id
         @self.app.route("/addId", methods=['POST'])
@@ -72,7 +95,13 @@ class demandForecastManager:
                 return jsonify({'message': message}), 400
 
             # store new identifiers
-            self.smartmeter_identifiers[building_identifier] = smartmeter_identifiers
+            meta_data_storage = metaDataStorage(
+                building_id=building_identifier,
+                smartmeter_ids=smartmeter_identifiers,
+                min_values={smartmeter_identifier: 0.0 for smartmeter_identifier in smartmeter_identifiers},
+                max_values={smartmeter_identifier: 0.0 for smartmeter_identifier in smartmeter_identifiers}
+            )
+            self.meta_data[building_identifier] = meta_data_storage
 
             # create and store dataframe
             columns = ['timestamp']
@@ -108,7 +137,9 @@ class demandForecastManager:
             ids_not_in_db = message['ids_not_in_db']
             
             # add new smartmeter identifiers to database
-            self.smartmeter_identifiers[building_identifier].extend(ids_not_in_db)
+            self.meta_data[building_identifier].smartmeter_ids.extend(ids_not_in_db)
+            self.meta_data[building_identifier].min_values.update({sm_id: 0.0 for sm_id in ids_not_in_db})
+            self.meta_data[building_identifier].max_values.update({sm_id: 0.0 for sm_id in ids_not_in_db})
 
             # add new columns to database
             try:
@@ -144,7 +175,9 @@ class demandForecastManager:
             
             # remove items
             for smartmeter_identifier in smartmeter_identifiers:
-                self.smartmeter_identifiers[building_identifier].remove(smartmeter_identifier)
+                self.meta_data[building_identifier].smartmeter_ids.remove(smartmeter_identifier)
+                del self.meta_data[building_identifier].min_values[smartmeter_identifier]
+                del self.meta_data[building_identifier].max_values[smartmeter_identifier]
 
             # delete columns
             data = pd.read_feather(f"{self.data_path}{building_identifier}.feather")
@@ -165,7 +198,7 @@ class demandForecastManager:
                 return jsonify({'message': message}), 400
             
             # delete building identifier
-            del self.smartmeter_identifiers[building_identifier]
+            del self.meta_data[building_identifier]
 
             # delete dataframe
             os.remove(f"{self.data_path}{building_identifier}.feather" )
@@ -189,7 +222,7 @@ class demandForecastManager:
                 return jsonify({'message': 'Start or end is invalid iso string'}), 400
 
             # check building identifier
-            if building_identifier not in self.smartmeter_identifiers.keys():
+            if building_identifier not in self.meta_data.keys():
                 return jsonify({'message': f'Building identifier {building_identifier} does not exist in database.'}), 404
             
             data = pd.read_feather(f"{self.data_path}{building_identifier}.feather")
@@ -348,7 +381,7 @@ class demandForecastManager:
         """
         valid, message = self.check_identifier_dtype(identifier=building_identifier)
         if valid:
-            if building_identifier in self.smartmeter_identifiers.keys():
+            if building_identifier in self.meta_data.keys():
                 return True, "Building identifier is in database."
             else:
                 return False, "Building identifier does not exist in database."
@@ -381,7 +414,7 @@ class demandForecastManager:
             if valid:
                 ids_in_db, ids_not_in_db = [], []
                 for smartmeter_identifier in smartmeter_identifiers:
-                    if smartmeter_identifier not in self.smartmeter_identifiers[building_identifier]:
+                    if smartmeter_identifier not in self.meta_data[building_identifier].smartmeter_ids:
                         ids_not_in_db.append(smartmeter_identifier)
                     else:
                         ids_in_db.append(smartmeter_identifier)
@@ -403,11 +436,11 @@ class demandForecastManager:
         # load smartmeter info
         if os.path.exists(self.smartmeter_path):
             with open(self.smartmeter_path, "rb") as f:
-                self.smartmeter_identifiers = pickle.load(file=f)
+                self.meta_data = pickle.load(file=f)
         else:
-            self.smartmeter_identifiers = {}
+            self.meta_data = {}
 
     def store_identifiers(self):
         """Stores identifiers to disk."""
         with open(self.smartmeter_path, "wb") as f:
-            pickle.dump(obj=self.smartmeter_identifiers, file=f)
+            pickle.dump(obj=self.meta_data, file=f)
