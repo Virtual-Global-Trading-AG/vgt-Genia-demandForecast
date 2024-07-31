@@ -98,8 +98,8 @@ class demandForecastManager:
             meta_data_storage = metaDataStorage(
                 building_id=building_identifier,
                 smartmeter_ids=smartmeter_identifiers,
-                min_values={smartmeter_identifier: 0.0 for smartmeter_identifier in smartmeter_identifiers},
-                max_values={smartmeter_identifier: 0.0 for smartmeter_identifier in smartmeter_identifiers}
+                min_values={smartmeter_identifier: float('inf') for smartmeter_identifier in smartmeter_identifiers},
+                max_values={smartmeter_identifier: float('-inf') for smartmeter_identifier in smartmeter_identifiers}
             )
             self.meta_data[building_identifier] = meta_data_storage
 
@@ -231,6 +231,22 @@ class demandForecastManager:
 
             return jsonify({'data': data_json}), 200
         
+        @self.app.route("/getMinMax", methods=['GET'])
+        def get_min_max():
+            building_id = request.headers.get("buildingIdentifier")
+            valid, message = self.check_building_identifier_db(building_identifier=building_id)
+
+            if not valid:
+                return jsonify({'message': message}), 400
+            
+            min_values = self.meta_data[building_id].min_values
+            max_values = self.meta_data[building_id].max_values
+
+            return jsonify({
+                'min': min_values,
+                'max': max_values
+            }), 200
+
         @self.app.route("/postMeasurements", methods=['POST'])
         def post_measurements():
             building_identifier = request.headers.get('buildingIdentifier')
@@ -278,12 +294,21 @@ class demandForecastManager:
                 if len(faulty_dtype_columns) > 0:
                     return jsonify({'message': f'Wrong dtype for the columns: {faulty_dtype_columns}'}), 400
                 
+            # update min and max values
+            for smartmeter_identifier in smartmeter_identifiers:
+                column_name = f'{smartmeter_identifier}_delta_energy'
+                new_min, new_max = new_data[column_name].min().item(), new_data[column_name].max().item()
+
+                # update meta data storage
+                self.meta_data[building_identifier].min_values[smartmeter_identifier] = min(self.meta_data[building_identifier].min_values[smartmeter_identifier], new_min)
+                self.meta_data[building_identifier].max_values[smartmeter_identifier] = max(self.meta_data[building_identifier].max_values[smartmeter_identifier], new_max)
+                
             # convert timestamps to datetime objects
             new_data['timestamp'] = new_data.timestamp.apply(lambda x: datetime.fromisoformat(x))
 
             if new_data.timestamp.dt.tz != timezone.utc:
                 return jsonify({'message': 'Timestamps have wrong timezone'}), 400
-        
+                    
             # write new values to database
             fp = self.data_path + building_identifier + ".feather"
             data = pd.read_feather(fp)
