@@ -105,9 +105,9 @@ class Preprocessor:
         # generate training, validation and test split
         end_of_training = int(data.shape[0] * self.splits[0])
         end_of_validation = int(data.shape[0] * (self.splits[0] + self.splits[1]))
-        self.training = data.iloc[:end_of_training,:].copy()
-        self.validation = data.iloc[end_of_training:end_of_validation, :].copy()
-        self.test = data.iloc[end_of_validation:, :].copy()
+        self.training = data.iloc[:end_of_training,:].copy().reset_index(drop=True)
+        self.validation = data.iloc[end_of_training:end_of_validation, :].copy().reset_index(drop=True)
+        self.test = data.iloc[end_of_validation:, :].copy().reset_index(drop=True)
 
         # remove timestamp columns from splits
         del self.training['timestamp']
@@ -233,7 +233,7 @@ class DemandForecast(torch.nn.Module):
             self.train()  # Set model to training mode
             total_train_loss = 0
 
-            for i, (samples, exogenous_features, target) in enumerate(training_loader):
+            for samples, exogenous_features, target in training_loader:
                 # Zero the parameter gradients
                 self.optimizer.zero_grad()
 
@@ -248,7 +248,6 @@ class DemandForecast(torch.nn.Module):
                 self.optimizer.step()
 
                 total_train_loss += loss.item()
-                print(i)
 
             avg_train_loss = total_train_loss / len(training_loader)
             print(f"Epoch [{epoch + 1}/{max_epochs}], Training Loss: {avg_train_loss:.4f}")
