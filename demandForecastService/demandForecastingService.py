@@ -54,7 +54,7 @@ class demandForecastService:
 
     def load_data(self, start, stop):
         """"""
-        # make request to demandforecastmanager
+        # make request to demandforecastdatamanager
 
         # preprocessing
 
