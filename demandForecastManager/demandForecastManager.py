@@ -281,6 +281,16 @@ class demandForecastManager:
             # check timestamp data
             if new_data.timestamp.dtype != 'object':
                 return jsonify({'message': f'{new_data.timestamp.dtype} wrong dtype for timestamp column'}), 400
+            
+            # check if timestamps are consecutive
+            new_data['time_diff'] = new_data['timestamp'].diff()
+            continuous = (new_data['time_diff'][1:] == pd.Timedelta(minutes=15)).all()
+
+            if not continuous:
+                return jsonify({'message': 'Timestamps of new data are not continuous!'}), 400
+            else:
+                del new_data['time_diff']
+            del continuous
 
             # check delta energy values
             for smartmeter_identifier in smartmeter_identifiers:
@@ -323,7 +333,17 @@ class demandForecastManager:
 
             # ensure sorting
             data.sort_values(by='timestamp', ascending=True, inplace=True)
+
+            # ensure timestamps are continuous
+            data['time_diff'] = data['timestamp'].diff()
+            continuous = (data['time_diff'][1:] == pd.Timedelta(minutes=15)).all()
             
+            if not continuous:
+                return jsonify({'message': 'Timestamps of merged data are not continuous'}), 400
+            else:
+                del data['time_diff']
+            del continuous
+
             data.to_feather(fp)
             
             return jsonify({'message': 'Wrote measurements to database'})
