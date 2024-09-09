@@ -1,0 +1,10 @@
+services:
+  dfm:
+    image: demandforecastdatamanager
+    ports:
+      - 5011:5000
+    environment:
+      - SERVICE_NAME=demandforecastdatamanager
+    restart: on-failure
+    volumes:
+      - ./:/app
